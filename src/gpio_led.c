@@ -14,6 +14,7 @@ struct LedController {
     bool requested;
     bool available;
 #if defined(ENABLE_GPIO)
+    /* LED effects run on a worker thread so packet capture never sleeps in the callback. */
     bool running;
     struct gpiod_chip *chip;
     struct gpiod_line *line;
@@ -54,6 +55,7 @@ static void play_pattern(struct gpiod_line *line, LedAction action)
 {
     unsigned int i;
 
+    /* Patterns match the project spec: short for ICMP, long for SSH, rapid for scan alert. */
     switch (action) {
     case LED_ACTION_SHORT:
         drive_line(line, 1);
@@ -82,6 +84,7 @@ static void play_pattern(struct gpiod_line *line, LedAction action)
 
 static int queue_pop(LedController *controller, LedAction *action)
 {
+    /* The worker blocks here instead of the capture callback blocking on LED timing. */
     while (controller->queue_count == 0U && controller->running) {
         (void)pthread_cond_wait(&controller->condition, &controller->mutex);
     }
@@ -131,6 +134,7 @@ LedController *led_controller_create(bool enable_led, const char *chip_path, uns
     controller->available = false;
     copy_warning(warning_buffer, warning_buffer_size, "");
 
+    /* LED is optional by design, so failure downgrades to warning instead of aborting netmon. */
     if (!enable_led) {
         return controller;
     }
@@ -238,6 +242,7 @@ void led_controller_enqueue(LedController *controller, LedAction action)
 
     queue_capacity = sizeof(controller->queue) / sizeof(controller->queue[0]);
 
+    /* If the queue is full we silently drop the LED pulse; monitoring matters more than blinking. */
     (void)pthread_mutex_lock(&controller->mutex);
     if (controller->queue_count < queue_capacity) {
         controller->queue[controller->queue_tail] = action;

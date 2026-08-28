@@ -13,6 +13,7 @@ static uint16_t read_u16_be(const uint8_t *buffer)
 {
     uint16_t value;
 
+    /* memcpy avoids unaligned reads from raw packet memory. */
     memcpy(&value, buffer, sizeof(value));
     return ntohs(value);
 }
@@ -39,6 +40,7 @@ void packet_info_reset(PacketInfo *info, size_t captured_length, size_t wire_len
 
 static ServiceHint detect_service_hint(uint8_t ip_protocol, uint16_t src_port, uint16_t dst_port)
 {
+    /* This is only a port-based hint, not application-layer proof. */
     if (ip_protocol == IPPROTO_TCP) {
         if (dst_port == 22U || src_port == 22U) {
             return SERVICE_HINT_SSH;
@@ -69,6 +71,7 @@ static void parse_arp(const uint8_t *buffer, size_t available_length, PacketInfo
     const size_t ethernet_ipv4_arp_payload_size = 20U;
     size_t offset = sizeof(struct arphdr);
 
+    /* First validate the fixed ARP header before reading the variable payload layout. */
     if (available_length < sizeof(struct arphdr)) {
         info->truncated = true;
         return;
@@ -117,6 +120,7 @@ static void parse_tcp(const uint8_t *buffer, size_t available_length, PacketInfo
 {
     uint8_t header_length;
 
+    /* The TCP data offset tells us the true TCP header length, including options. */
     if (available_length < sizeof(struct tcphdr)) {
         info->truncated = true;
         return;
@@ -177,6 +181,7 @@ static void parse_ipv4(const uint8_t *buffer, size_t available_length, PacketInf
     const uint8_t *transport;
     size_t transport_length;
 
+    /* IPv4 IHL is measured in 32-bit words, so convert it into bytes before using it. */
     if (available_length < sizeof(struct ip)) {
         info->truncated = true;
         return;
@@ -212,6 +217,7 @@ static void parse_ipv4(const uint8_t *buffer, size_t available_length, PacketInf
     info->ipv4_fragmented = more_fragments || fragment_offset != 0U;
     info->ipv4_l4_header_available = (fragment_offset == 0U);
 
+    /* Non-zero fragment offsets can start in the middle of a TCP/UDP payload, so stop here. */
     if (!info->ipv4_l4_header_available) {
         return;
     }
@@ -245,6 +251,7 @@ bool parse_packet(const uint8_t *packet, size_t captured_length, size_t wire_len
 
     packet_info_reset(info, captured_length, wire_length);
 
+    /* Ethernet is the outermost layer in this project, so parsing starts there. */
     if (captured_length < sizeof(struct ether_header)) {
         info->truncated = true;
         return false;
@@ -264,6 +271,7 @@ bool parse_packet(const uint8_t *packet, size_t captured_length, size_t wire_len
         parse_ipv4(packet + offset, captured_length - offset, info);
         break;
     case ETHERTYPE_IPV6:
+        /* v1 only reports that IPv6 was seen; it does not decode deeper headers. */
         info->is_ipv6_observed = true;
         break;
     default:

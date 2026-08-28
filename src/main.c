@@ -19,6 +19,7 @@
 #define DEFAULT_SCAN_THRESHOLD 20U
 
 typedef struct AppConfig {
+    /* Runtime options parsed from CLI. */
     const char *interface_name;
     const char *log_path;
     unsigned int scan_window_seconds;
@@ -30,6 +31,7 @@ typedef struct AppConfig {
 } AppConfig;
 
 typedef struct AppContext {
+    /* Shared runtime objects passed into the libpcap callback. */
     Logger *logger;
     LedController *led_controller;
     ScanDetector *scan_detector;
@@ -67,6 +69,7 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
 {
     int index;
 
+    /* Keep all defaults in one place so CLI parsing only overrides them. */
     config->interface_name = NULL;
     config->log_path = DEFAULT_LOG_PATH;
     config->scan_window_seconds = DEFAULT_SCAN_WINDOW;
@@ -151,6 +154,7 @@ static void handle_signal(int signal_number)
 {
     (void)signal_number;
     g_stop_requested = 1;
+    /* pcap_loop() is blocking, so the signal handler asks libpcap to exit its loop. */
     if (g_capture_handle != NULL) {
         capture_break(g_capture_handle);
     }
@@ -167,6 +171,7 @@ static void process_packet(const struct pcap_pkthdr *header, const uint8_t *pack
         return;
     }
 
+    /* Parse first, then let rule logic decide whether the packet becomes an event. */
     (void)parse_packet(packet, header->caplen, header->len, &packet_info);
 
     if (rules_evaluate_packet(&packet_info, &event)) {
@@ -174,6 +179,7 @@ static void process_packet(const struct pcap_pkthdr *header, const uint8_t *pack
         led_controller_enqueue(context->led_controller, event.led_action);
     }
 
+    /* Port-scan alerts are a second decision layer built on top of parsed TCP SYN traffic. */
     if (scan_detector_observe(context->scan_detector, &packet_info, &scan_alert)) {
         rules_make_scan_alert(scan_alert.src_ipv4, scan_alert.unique_ports, scan_alert.window_seconds, &event);
         logger_emit(context->logger, &event);
@@ -194,6 +200,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    /* Initialize subsystems in dependency order so cleanup is predictable on failure. */
     context.logger = logger_open(config.log_path, error_buffer, sizeof(error_buffer));
     if (context.logger == NULL) {
         (void)fprintf(stderr, "Failed to initialize logger: %s\n", error_buffer);
@@ -224,6 +231,7 @@ int main(int argc, char **argv)
         (void)fprintf(stderr, "[WARN ] %s\n", led_warning);
     }
 
+    /* SIGINT/SIGTERM provide a clean Ctrl+C path instead of killing capture mid-call. */
     if (signal(SIGINT, handle_signal) == SIG_ERR || signal(SIGTERM, handle_signal) == SIG_ERR) {
         (void)fprintf(stderr, "Failed to install signal handlers\n");
         led_controller_destroy(context.led_controller);
@@ -249,6 +257,7 @@ int main(int argc, char **argv)
                   config.scan_threshold,
                   led_controller_is_available(context.led_controller) ? "enabled" : "disabled");
 
+    /* After this point, almost all work happens inside process_packet(). */
     loop_result = capture_loop(g_capture_handle, process_packet, &context);
     if (loop_result == -1) {
         (void)fprintf(stderr, "pcap loop failed: %s\n", capture_get_error(g_capture_handle));
@@ -258,6 +267,7 @@ int main(int argc, char **argv)
 
     capture_close(g_capture_handle);
     g_capture_handle = NULL;
+    /* Cleanup runs in reverse order of initialization. */
     led_controller_destroy(context.led_controller);
     scan_detector_destroy(context.scan_detector);
     logger_close(context.logger);

@@ -46,6 +46,7 @@ static void format_ipv4(uint32_t ipv4_network_order, char *buffer, size_t buffer
 {
     struct in_addr address;
 
+    /* PacketInfo keeps IPv4 addresses in network byte order, matching packet layout. */
     address.s_addr = ipv4_network_order;
     if (inet_ntop(AF_INET, &address, buffer, (socklen_t)buffer_size) == NULL) {
         strncpy(buffer, "0.0.0.0", buffer_size - 1U);
@@ -57,6 +58,7 @@ static void format_tcp_flags(uint8_t flags, char *buffer, size_t buffer_size)
 {
     size_t written = 0U;
 
+    /* Only show the flags this prototype cares about in logs and demos. */
     buffer[0] = '\0';
 
     if ((flags & 0x02U) != 0U) {
@@ -84,6 +86,7 @@ static void format_timestamp(char *buffer, size_t buffer_size)
     char raw_buffer[32];
     size_t raw_length;
 
+    /* Log timestamps are ISO-8601-like so shell tools can still parse them comfortably. */
     now = time(NULL);
     if (now == (time_t)-1) {
         strncpy(buffer, "1970-01-01T00:00:00+00:00", buffer_size - 1U);
@@ -133,6 +136,7 @@ static void build_terminal_message(const Event *event, char *buffer, size_t buff
     mac[0] = '\0';
     flags[0] = '\0';
 
+    /* Terminal output is optimized for quick reading during live demos. */
     switch (event->kind) {
     case EVENT_KIND_ARP:
         format_ipv4(packet->arp_sender_ipv4, sender_ip, sizeof(sender_ip));
@@ -222,6 +226,7 @@ static void build_log_message(const Event *event, char *buffer, size_t buffer_si
     sender_mac[0] = '\0';
     flags[0] = '\0';
 
+    /* Log output is flatter and more key-value shaped for grep/awk usage. */
     switch (event->kind) {
     case EVENT_KIND_ARP:
         format_ipv4(packet->arp_sender_ipv4, sender_ip, sizeof(sender_ip));
@@ -330,6 +335,7 @@ void logger_emit(Logger *logger, const Event *event)
         return;
     }
 
+    /* One event fan-outs into human-readable terminal output and structured log output. */
     build_terminal_message(event, terminal_message, sizeof(terminal_message));
     build_log_message(event, log_message, sizeof(log_message));
 

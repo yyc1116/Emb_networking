@@ -6,12 +6,14 @@
 #include <time.h>
 
 typedef struct PortEntry {
+    /* Each unique destination port seen from the same source within the time window. */
     uint16_t port;
     time_t seen_at;
     struct PortEntry *next;
 } PortEntry;
 
 typedef struct SourceEntry {
+    /* Per-source state used to decide whether many ports were touched quickly. */
     uint32_t src_ipv4;
     time_t last_seen_at;
     time_t last_alert_at;
@@ -20,6 +22,7 @@ typedef struct SourceEntry {
 } SourceEntry;
 
 struct ScanDetector {
+    /* Simple linked-list state is enough for the small prototype scope. */
     unsigned int window_seconds;
     size_t threshold;
     SourceEntry *sources;
@@ -51,6 +54,7 @@ static void prune_ports(SourceEntry *source, time_t now, unsigned int window_sec
 
     while (current != NULL) {
         next = current->next;
+        /* Ports outside the window should stop contributing to scan counts. */
         if ((unsigned int)difftime(now, current->seen_at) > window_seconds) {
             if (previous == NULL) {
                 source->ports = next;
@@ -88,6 +92,7 @@ static SourceEntry *find_or_create_source(ScanDetector *detector, uint32_t src_i
         source = source->next;
     }
 
+    /* New source IP, start a fresh tracking bucket for it. */
     source = (SourceEntry *)calloc(1U, sizeof(*source));
     if (source == NULL) {
         return NULL;
@@ -106,6 +111,7 @@ static bool upsert_port(SourceEntry *source, uint16_t port, time_t now)
 
     while (current != NULL) {
         if (current->port == port) {
+            /* Re-touching the same port refreshes its timestamp but does not grow the set. */
             current->seen_at = now;
             return true;
         }
@@ -133,6 +139,7 @@ static void prune_sources(ScanDetector *detector, time_t now)
     while (current != NULL) {
         next = current->next;
         prune_ports(current, now, detector->window_seconds);
+        /* Drop fully idle source buckets to keep memory bounded over long runs. */
         if (current->ports == NULL &&
             (unsigned int)difftime(now, current->last_seen_at) > detector->window_seconds &&
             (unsigned int)difftime(now, current->last_alert_at) > detector->window_seconds) {
@@ -173,6 +180,7 @@ bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, Sca
         return false;
     }
 
+    /* The spec defines a scan as many TCP initial SYNs from one source. */
     if (!packet->has_ipv4 || !packet->has_tcp || !packet->has_ports) {
         return false;
     }
@@ -204,6 +212,7 @@ bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, Sca
         return false;
     }
 
+    /* Cooldown prevents one ongoing scan from raising an alert on every packet. */
     if ((unsigned int)difftime(now, source->last_alert_at) <= detector->window_seconds) {
         return false;
     }
