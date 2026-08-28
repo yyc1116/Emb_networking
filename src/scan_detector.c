@@ -1,0 +1,236 @@
+#include "scan_detector.h"
+
+#include <netinet/tcp.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+typedef struct PortEntry {
+    uint16_t port;
+    time_t seen_at;
+    struct PortEntry *next;
+} PortEntry;
+
+typedef struct SourceEntry {
+    uint32_t src_ipv4;
+    time_t last_seen_at;
+    time_t last_alert_at;
+    PortEntry *ports;
+    struct SourceEntry *next;
+} SourceEntry;
+
+struct ScanDetector {
+    unsigned int window_seconds;
+    size_t threshold;
+    SourceEntry *sources;
+};
+
+static void free_ports(PortEntry *ports)
+{
+    PortEntry *next_port;
+
+    while (ports != NULL) {
+        next_port = ports->next;
+        free(ports);
+        ports = next_port;
+    }
+}
+
+static void prune_ports(SourceEntry *source, time_t now, unsigned int window_seconds)
+{
+    PortEntry *current;
+    PortEntry *previous;
+    PortEntry *next;
+
+    if (source == NULL) {
+        return;
+    }
+
+    previous = NULL;
+    current = source->ports;
+
+    while (current != NULL) {
+        next = current->next;
+        if ((unsigned int)difftime(now, current->seen_at) > window_seconds) {
+            if (previous == NULL) {
+                source->ports = next;
+            } else {
+                previous->next = next;
+            }
+            free(current);
+        } else {
+            previous = current;
+        }
+        current = next;
+    }
+}
+
+static size_t count_ports(const PortEntry *ports)
+{
+    size_t count = 0U;
+
+    while (ports != NULL) {
+        ++count;
+        ports = ports->next;
+    }
+
+    return count;
+}
+
+static SourceEntry *find_or_create_source(ScanDetector *detector, uint32_t src_ipv4)
+{
+    SourceEntry *source = detector->sources;
+
+    while (source != NULL) {
+        if (source->src_ipv4 == src_ipv4) {
+            return source;
+        }
+        source = source->next;
+    }
+
+    source = (SourceEntry *)calloc(1U, sizeof(*source));
+    if (source == NULL) {
+        return NULL;
+    }
+
+    source->src_ipv4 = src_ipv4;
+    source->next = detector->sources;
+    detector->sources = source;
+    return source;
+}
+
+static bool upsert_port(SourceEntry *source, uint16_t port, time_t now)
+{
+    PortEntry *current = source->ports;
+    PortEntry *entry;
+
+    while (current != NULL) {
+        if (current->port == port) {
+            current->seen_at = now;
+            return true;
+        }
+        current = current->next;
+    }
+
+    entry = (PortEntry *)calloc(1U, sizeof(*entry));
+    if (entry == NULL) {
+        return false;
+    }
+
+    entry->port = port;
+    entry->seen_at = now;
+    entry->next = source->ports;
+    source->ports = entry;
+    return true;
+}
+
+static void prune_sources(ScanDetector *detector, time_t now)
+{
+    SourceEntry *current = detector->sources;
+    SourceEntry *previous = NULL;
+    SourceEntry *next;
+
+    while (current != NULL) {
+        next = current->next;
+        prune_ports(current, now, detector->window_seconds);
+        if (current->ports == NULL &&
+            (unsigned int)difftime(now, current->last_seen_at) > detector->window_seconds &&
+            (unsigned int)difftime(now, current->last_alert_at) > detector->window_seconds) {
+            if (previous == NULL) {
+                detector->sources = next;
+            } else {
+                previous->next = next;
+            }
+            free(current);
+        } else {
+            previous = current;
+        }
+        current = next;
+    }
+}
+
+ScanDetector *scan_detector_create(unsigned int window_seconds, size_t threshold)
+{
+    ScanDetector *detector;
+
+    detector = (ScanDetector *)calloc(1U, sizeof(*detector));
+    if (detector == NULL) {
+        return NULL;
+    }
+
+    detector->window_seconds = (window_seconds == 0U) ? 10U : window_seconds;
+    detector->threshold = (threshold == 0U) ? 20U : threshold;
+    return detector;
+}
+
+bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, ScanAlert *alert)
+{
+    SourceEntry *source;
+    time_t now;
+    size_t unique_ports;
+
+    if (detector == NULL || packet == NULL || alert == NULL) {
+        return false;
+    }
+
+    if (!packet->has_ipv4 || !packet->has_tcp || !packet->has_ports) {
+        return false;
+    }
+
+    if ((packet->tcp_flags & TH_SYN) == 0U || (packet->tcp_flags & TH_ACK) != 0U) {
+        return false;
+    }
+
+    now = time(NULL);
+    if (now == (time_t)-1) {
+        return false;
+    }
+
+    prune_sources(detector, now);
+
+    source = find_or_create_source(detector, packet->src_ipv4);
+    if (source == NULL) {
+        return false;
+    }
+
+    source->last_seen_at = now;
+    prune_ports(source, now, detector->window_seconds);
+    if (!upsert_port(source, packet->dst_port, now)) {
+        return false;
+    }
+
+    unique_ports = count_ports(source->ports);
+    if (unique_ports < detector->threshold) {
+        return false;
+    }
+
+    if ((unsigned int)difftime(now, source->last_alert_at) <= detector->window_seconds) {
+        return false;
+    }
+
+    source->last_alert_at = now;
+    alert->src_ipv4 = packet->src_ipv4;
+    alert->unique_ports = unique_ports;
+    alert->window_seconds = detector->window_seconds;
+    return true;
+}
+
+void scan_detector_destroy(ScanDetector *detector)
+{
+    SourceEntry *current;
+    SourceEntry *next;
+
+    if (detector == NULL) {
+        return;
+    }
+
+    current = detector->sources;
+    while (current != NULL) {
+        next = current->next;
+        free_ports(current->ports);
+        free(current);
+        current = next;
+    }
+
+    free(detector);
+}
