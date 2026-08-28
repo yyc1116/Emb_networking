@@ -86,6 +86,12 @@ make
 make test-parser
 ```
 
+如果你只想先建出測試 binary、不執行它：
+
+```bash
+make test-parser-build
+```
+
 指定交叉編譯器：
 
 ```bash
@@ -113,7 +119,8 @@ Build 變數：
 - 不要把 VM 內的 cross compiler 絕對路徑 hard-code 進 Makefile
 - `libpcap` 採 dynamic linking
 - `ENABLE_GPIO=1` 時需要 `libgpiod`
-- `make test-parser` 是 host-side synthetic parser safety test
+- `make test-parser` 會建置並執行 host-side synthetic parser safety test
+- `make test-parser-build` 只建置測試程式，不執行
 
 ## 執行方式
 

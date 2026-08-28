@@ -1,5 +1,6 @@
 TARGET := netmon
 TEST_TARGET := tests/parser_synthetic
+TEST_BUILD_TARGET := test-parser-build
 
 SRC := \
 	src/main.c \
@@ -31,11 +32,14 @@ LDFLAGS += -pthread
 LDLIBS += -lgpiod
 endif
 
-.PHONY: all clean test-parser
+.PHONY: all clean test-parser test-parser-build
 
 all: $(TARGET)
 
 test-parser: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+test-parser-build: $(TEST_TARGET)
 
 $(TARGET): $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LDLIBS)
