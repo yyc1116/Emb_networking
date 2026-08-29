@@ -8,6 +8,8 @@
 #include "gpio_led.h"
 #include "packet_info.h"
 
+typedef struct RulesEngine RulesEngine;
+
 typedef enum EventSeverity {
     EVENT_SEVERITY_INFO = 0,
     EVENT_SEVERITY_ALERT
@@ -36,6 +38,9 @@ typedef struct Event {
 } Event;
 
 bool rules_evaluate_packet(const PacketInfo *packet, Event *event);
+RulesEngine *rules_engine_create(void);
+void rules_engine_destroy(RulesEngine *engine);
+bool rules_engine_evaluate_packet(RulesEngine *engine, const PacketInfo *packet, Event *event);
 void rules_make_scan_alert(uint32_t src_ipv4, size_t unique_ports, unsigned int window_seconds, Event *event);
 
 #endif

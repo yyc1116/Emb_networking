@@ -318,6 +318,8 @@ DNS traffic：
 nslookup openai.com 8.8.8.8
 ```
 
+注意：若 `netmon` 是跑在 Pi 上，最穩定的 DNS 驗證方式是直接在 Pi 上執行 `nslookup`，或確認 DNS 封包真的會經過 Pi 正在監控的介面。
+
 Expected：
 
 - Echo Request 顯示 `ICMP Echo Request`
@@ -329,7 +331,7 @@ Failure indicators：
 
 - TCP flags 顯示錯誤
 - DNS 沒有 hint
-- SSH 不是只有 initial SYN 被提升成 alert
+- SSH 同一次連線嘗試因 retransmission 被重複 alert
 
 ### Milestone 5: Logger
 
@@ -387,6 +389,8 @@ for p in $(seq 1 25); do
 done
 ```
 
+注意：需要讓整段掃描在 `--scan-window` 內完成，並且真的送到至少 20 個不同 destination ports，否則不會觸發 alert。
+
 Expected：
 
 - 同一來源在 10 秒內碰到至少 20 個不同 destination ports 時，出現一次 `Possible port scan`
@@ -396,6 +400,10 @@ Failure indicators：
 
 - 少量連線就誤報
 - 每個符合條件的後續封包都重複 alert
+
+## 時間校正提醒
+
+如果 Pi 的 `date` 顯示類似 `1970-01-01`，代表系統時間還沒同步。這不一定是 `netmon` 的邏輯錯誤，但會讓 log timestamp 失真，建議先校時再做最終驗證。
 
 ## Ground Truth 對照
 

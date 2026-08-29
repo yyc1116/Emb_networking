@@ -107,11 +107,19 @@ static void format_timestamp(char *buffer, size_t buffer_size)
     }
 
     raw_length = strlen(raw_buffer);
-    if (raw_length >= 5U) {
-        raw_buffer[raw_length + 1U] = '\0';
-        raw_buffer[raw_length] = raw_buffer[raw_length - 1U];
-        raw_buffer[raw_length - 1U] = raw_buffer[raw_length - 2U];
-        raw_buffer[raw_length - 2U] = ':';
+    if (raw_length >= 5U &&
+        (raw_buffer[raw_length - 5U] == '+' || raw_buffer[raw_length - 5U] == '-')) {
+        (void)snprintf(buffer,
+                       buffer_size,
+                       "%.*s%c%c%c:%c%c",
+                       (int)(raw_length - 5U),
+                       raw_buffer,
+                       raw_buffer[raw_length - 5U],
+                       raw_buffer[raw_length - 4U],
+                       raw_buffer[raw_length - 3U],
+                       raw_buffer[raw_length - 2U],
+                       raw_buffer[raw_length - 1U]);
+        return;
     }
 
     strncpy(buffer, raw_buffer, buffer_size - 1U);

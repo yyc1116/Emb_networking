@@ -35,6 +35,7 @@ typedef struct AppContext {
     Logger *logger;
     LedController *led_controller;
     ScanDetector *scan_detector;
+    RulesEngine *rules_engine;
 } AppContext;
 
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -174,7 +175,7 @@ static void process_packet(const struct pcap_pkthdr *header, const uint8_t *pack
     /* Parse first, then let rule logic decide whether the packet becomes an event. */
     (void)parse_packet(packet, header->caplen, header->len, &packet_info);
 
-    if (rules_evaluate_packet(&packet_info, &event)) {
+    if (rules_engine_evaluate_packet(context->rules_engine, &packet_info, &event)) {
         logger_emit(context->logger, &event);
         led_controller_enqueue(context->led_controller, event.led_action);
     }
@@ -214,6 +215,14 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    context.rules_engine = rules_engine_create();
+    if (context.rules_engine == NULL) {
+        (void)fprintf(stderr, "Failed to initialize rules engine\n");
+        scan_detector_destroy(context.scan_detector);
+        logger_close(context.logger);
+        return EXIT_FAILURE;
+    }
+
     context.led_controller = led_controller_create(config.enable_led,
                                                    config.gpio_chip,
                                                    config.gpio_line,
@@ -222,6 +231,7 @@ int main(int argc, char **argv)
                                                    sizeof(led_warning));
     if (context.led_controller == NULL) {
         (void)fprintf(stderr, "Failed to allocate LED controller\n");
+        rules_engine_destroy(context.rules_engine);
         scan_detector_destroy(context.scan_detector);
         logger_close(context.logger);
         return EXIT_FAILURE;
@@ -235,6 +245,7 @@ int main(int argc, char **argv)
     if (signal(SIGINT, handle_signal) == SIG_ERR || signal(SIGTERM, handle_signal) == SIG_ERR) {
         (void)fprintf(stderr, "Failed to install signal handlers\n");
         led_controller_destroy(context.led_controller);
+        rules_engine_destroy(context.rules_engine);
         scan_detector_destroy(context.scan_detector);
         logger_close(context.logger);
         return EXIT_FAILURE;
@@ -244,6 +255,7 @@ int main(int argc, char **argv)
     if (g_capture_handle == NULL) {
         (void)fprintf(stderr, "Failed to open interface %s: %s\n", config.interface_name, error_buffer);
         led_controller_destroy(context.led_controller);
+        rules_engine_destroy(context.rules_engine);
         scan_detector_destroy(context.scan_detector);
         logger_close(context.logger);
         return EXIT_FAILURE;
@@ -269,6 +281,7 @@ int main(int argc, char **argv)
     g_capture_handle = NULL;
     /* Cleanup runs in reverse order of initialization. */
     led_controller_destroy(context.led_controller);
+    rules_engine_destroy(context.rules_engine);
     scan_detector_destroy(context.scan_detector);
     logger_close(context.logger);
 
