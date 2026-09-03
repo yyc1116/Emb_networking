@@ -1,5 +1,4 @@
-CODEX_COMPLETE_NETWORK_MONITOR_1.md
-NETWORKING_NOTES.md
-
+*.md
+| README.md
 *.txt
-netmon.log
+*.log
