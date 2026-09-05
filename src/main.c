@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "display.h"
 #include "gpio_led.h"
 #include "logger.h"
 #include "parser.h"
@@ -6,6 +7,7 @@
 #include "scan_detector.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +30,9 @@ typedef struct AppConfig {
     const char *gpio_chip;
     bool gpio_line_provided;
     unsigned int gpio_line;
+    DisplayConfig display;
+    bool display_clk_provided;
+    bool display_dio_provided;
 } AppConfig;
 
 typedef struct AppContext {
@@ -36,6 +41,7 @@ typedef struct AppContext {
     LedController *led_controller;
     ScanDetector *scan_detector;
     RulesEngine *rules_engine;
+    DisplayController *display_controller;
 } AppContext;
 
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -45,16 +51,24 @@ static void print_usage(const char *program_name)
 {
     (void)fprintf(stderr,
                   "Usage: %s -i <interface> [-l <log_path>] [--scan-window <seconds>] [--scan-threshold <count>] "
-                  "[--gpio-chip <path>] [--gpio-line <line>] [--no-led]\n",
+                  "[--gpio-chip <path>] [--gpio-line <line>] [--no-led] "
+                  "[--display none|tm1637] [--display-clk <line>] [--display-dio <line>] "
+                  "[--display-brightness <0..7>]\n",
                   program_name);
 }
 
 static bool parse_unsigned_value(const char *text, unsigned long *value)
 {
     char *end_pointer = NULL;
+    const char *cursor;
 
     if (text == NULL || text[0] == '\0') {
         return false;
+    }
+    for (cursor = text; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
     }
 
     errno = 0;
@@ -79,6 +93,9 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
     config->gpio_chip = DEFAULT_GPIO_CHIP;
     config->gpio_line_provided = false;
     config->gpio_line = 0U;
+    config->display = (DisplayConfig){false, DEFAULT_GPIO_CHIP, 0U, 0U, 3U};
+    config->display_clk_provided = false;
+    config->display_dio_provided = false;
 
     for (index = 1; index < argc; ++index) {
         unsigned long parsed_value;
@@ -100,7 +117,8 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
         }
 
         if (strcmp(argv[index], "--scan-window") == 0) {
-            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) || parsed_value == 0UL) {
+            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) ||
+                parsed_value == 0UL || parsed_value > UINT_MAX) {
                 return false;
             }
             config->scan_window_seconds = (unsigned int)parsed_value;
@@ -109,7 +127,8 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
         }
 
         if (strcmp(argv[index], "--scan-threshold") == 0) {
-            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) || parsed_value == 0UL) {
+            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) ||
+                parsed_value == 0UL) {
                 return false;
             }
             config->scan_threshold = (size_t)parsed_value;
@@ -126,7 +145,7 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
         }
 
         if (strcmp(argv[index], "--gpio-line") == 0) {
-            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value)) {
+            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) || parsed_value > UINT_MAX) {
                 return false;
             }
             config->gpio_line = (unsigned int)parsed_value;
@@ -140,6 +159,44 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
             continue;
         }
 
+        if (strcmp(argv[index], "--display") == 0) {
+            if (index + 1 >= argc) {
+                return false;
+            }
+            ++index;
+            if (strcmp(argv[index], "tm1637") == 0) {
+                config->display.enabled = true;
+            } else if (strcmp(argv[index], "none") == 0) {
+                config->display.enabled = false;
+            } else {
+                return false;
+            }
+            continue;
+        }
+
+        if (strcmp(argv[index], "--display-clk") == 0 ||
+            strcmp(argv[index], "--display-dio") == 0 ||
+            strcmp(argv[index], "--display-brightness") == 0) {
+            if (index + 1 >= argc || !parse_unsigned_value(argv[index + 1], &parsed_value) ||
+                parsed_value > UINT_MAX) {
+                return false;
+            }
+            if (strcmp(argv[index], "--display-clk") == 0) {
+                config->display.clk_line = (unsigned int)parsed_value;
+                config->display_clk_provided = true;
+            } else if (strcmp(argv[index], "--display-dio") == 0) {
+                config->display.dio_line = (unsigned int)parsed_value;
+                config->display_dio_provided = true;
+            } else {
+                if (parsed_value > 7UL) {
+                    return false;
+                }
+                config->display.brightness = (unsigned int)parsed_value;
+            }
+            ++index;
+            continue;
+        }
+
         if (strcmp(argv[index], "-h") == 0 || strcmp(argv[index], "--help") == 0) {
             print_usage(argv[0]);
             exit(EXIT_SUCCESS);
@@ -148,6 +205,15 @@ static bool parse_arguments(int argc, char **argv, AppConfig *config)
         return false;
     }
 
+    config->display.chip_path = config->gpio_chip;
+    if (config->display.enabled &&
+        (!config->display_clk_provided || !config->display_dio_provided ||
+         config->display.clk_line == config->display.dio_line ||
+         (config->enable_led && config->gpio_line_provided &&
+          (config->gpio_line == config->display.clk_line || config->gpio_line == config->display.dio_line)))) {
+        (void)fprintf(stderr, "TM1637 requires distinct CLK/DIO lines, separate from the enabled LED\n");
+        return false;
+    }
     return config->interface_name != NULL;
 }
 
@@ -176,6 +242,7 @@ static void process_packet(const struct pcap_pkthdr *header, const uint8_t *pack
     (void)parse_packet(packet, header->caplen, header->len, &packet_info);
 
     if (rules_engine_evaluate_packet(context->rules_engine, &packet_info, &event)) {
+        display_controller_record_event(context->display_controller, &event);
         logger_emit(context->logger, &event);
         led_controller_enqueue(context->led_controller, event.led_action);
     }
@@ -186,14 +253,16 @@ static void process_packet(const struct pcap_pkthdr *header, const uint8_t *pack
         logger_emit(context->logger, &event);
         led_controller_enqueue(context->led_controller, event.led_action);
     }
+    display_controller_publish_scan(context->display_controller, context->scan_detector);
 }
 
 int main(int argc, char **argv)
 {
     AppConfig config;
-    AppContext context;
+    AppContext context = {0};
     char error_buffer[256];
     char led_warning[256];
+    char display_warning[256];
     int loop_result;
 
     if (!parse_arguments(argc, argv, &config)) {
@@ -241,9 +310,15 @@ int main(int argc, char **argv)
         (void)fprintf(stderr, "[WARN ] %s\n", led_warning);
     }
 
+    context.display_controller = display_controller_create(&config.display, display_warning, sizeof(display_warning));
+    if (display_warning[0] != '\0') {
+        (void)fprintf(stderr, "[WARN ] %s\n", display_warning);
+    }
+
     /* SIGINT/SIGTERM provide a clean Ctrl+C path instead of killing capture mid-call. */
     if (signal(SIGINT, handle_signal) == SIG_ERR || signal(SIGTERM, handle_signal) == SIG_ERR) {
         (void)fprintf(stderr, "Failed to install signal handlers\n");
+        display_controller_destroy(context.display_controller);
         led_controller_destroy(context.led_controller);
         rules_engine_destroy(context.rules_engine);
         scan_detector_destroy(context.scan_detector);
@@ -254,6 +329,7 @@ int main(int argc, char **argv)
     g_capture_handle = capture_open(config.interface_name, 65535, 1, 1000, error_buffer, sizeof(error_buffer));
     if (g_capture_handle == NULL) {
         (void)fprintf(stderr, "Failed to open interface %s: %s\n", config.interface_name, error_buffer);
+        display_controller_destroy(context.display_controller);
         led_controller_destroy(context.led_controller);
         rules_engine_destroy(context.rules_engine);
         scan_detector_destroy(context.scan_detector);
@@ -262,12 +338,13 @@ int main(int argc, char **argv)
     }
 
     (void)fprintf(stdout,
-                  "netmon listening on %s (log=%s, scan-window=%u, scan-threshold=%zu, led=%s)\n",
+                  "netmon listening on %s (log=%s, scan-window=%u, scan-threshold=%zu, led=%s, display=%s)\n",
                   config.interface_name,
                   config.log_path,
                   config.scan_window_seconds,
                   config.scan_threshold,
-                  led_controller_is_available(context.led_controller) ? "enabled" : "disabled");
+                  led_controller_is_available(context.led_controller) ? "enabled" : "disabled",
+                  display_controller_is_available(context.display_controller) ? "tm1637" : "disabled");
 
     /* After this point, almost all work happens inside process_packet(). */
     loop_result = capture_loop(g_capture_handle, process_packet, &context);
@@ -280,6 +357,7 @@ int main(int argc, char **argv)
     capture_close(g_capture_handle);
     g_capture_handle = NULL;
     /* Cleanup runs in reverse order of initialization. */
+    display_controller_destroy(context.display_controller);
     led_controller_destroy(context.led_controller);
     rules_engine_destroy(context.rules_engine);
     scan_detector_destroy(context.scan_detector);

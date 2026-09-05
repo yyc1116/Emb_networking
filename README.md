@@ -1,6 +1,6 @@
 # netmon
 
-`netmon` 是一個跑在 Raspberry Pi 3 B+ / Buildroot Linux 上的被動式網路監控原型。它使用 `libpcap` 抓取封包，解析常見 L2/L3/L4 標頭，套用固定規則輸出 `INFO` / `ALERT`，寫入 log，並在可用時透過 `libgpiod` 驅動 LED 提示事件。
+`netmon` 是一個跑在 Raspberry Pi 3 B+ / Buildroot Linux 上的被動式網路監控原型。它使用 `libpcap` 抓取封包，解析常見 L2/L3/L4 標頭，套用固定規則輸出 `INFO` / `ALERT`，寫入 log，並可透過 `libgpiod` 驅動 LED 與 TM1637 四位七段顯示器。
 
 第一版的定位是：
 
@@ -22,10 +22,12 @@ libpcap capture
   -> rules
   -> terminal/log event
   -> optional LED worker
+  -> optional display counters -> display worker -> TM1637
 
 TCP initial SYN
   -> scan detector
   -> extra ALERT event
+  -> immutable scan snapshot -> display worker (current window maximum)
 ```
 
 模組分工：
@@ -37,6 +39,8 @@ TCP initial SYN
 - `src/logger.c`: terminal 與 log file 格式化輸出
 - `src/scan_detector.c`: 10 秒視窗內的 unique destination port 掃描偵測
 - `src/gpio_led.c`: 非阻塞 LED worker，避免卡住 packet capture callback
+- `src/display.c`: 累計數字、掃描快照交接、獨立顯示 worker 與固定輪播
+- `src/tm1637.c`: libgpiod 1.x 開漏 GPIO、TM1637 通訊與數字段碼
 
 ## 可偵測內容
 
@@ -84,12 +88,14 @@ TCP initial SYN
 make clean
 make
 make test-parser
+make test-display
 ```
 
 如果你只想先建出測試 binary、不執行它：
 
 ```bash
 make test-parser-build
+make test-display-build
 ```
 
 指定交叉編譯器：
@@ -118,9 +124,12 @@ Build 變數：
 
 - 不要把 VM 內的 cross compiler 絕對路徑 hard-code 進 Makefile
 - `libpcap` 採 dynamic linking
-- `ENABLE_GPIO=1` 時需要 `libgpiod`
+- 所有版本使用 pthread；只有 `ENABLE_GPIO=1` 時需要 `libgpiod` 1.x（沿用既有 LED API，未遷移至 2.x）
+- 切換 `ENABLE_GPIO`、編譯器或編譯旗標前，先執行 `make clean`
 - `make test-parser` 會建置並執行 host-side synthetic parser safety test
 - `make test-parser-build` 只建置測試程式，不執行
+- `make test-display` 驗證數字、掃描視窗、SSH 去重、worker 交接、慢速輸出與失敗降級；使用模擬 GPIO，不需接實體顯示器
+- `make test-display-build` 只建置顯示測試；測試使用 GNU linker 的 `--wrap` 注入時間與配置失敗
 
 ## 執行方式
 
@@ -157,6 +166,82 @@ CLI 選項：
 - `--gpio-chip <path>`: GPIO chip 路徑，預設 `/dev/gpiochip0`
 - `--gpio-line <line>`: GPIO line number
 - `--no-led`: 停用 LED
+- `--display none|tm1637`: 預設 `none`，明確選擇 `tm1637` 才啟用顯示器
+- `--display-clk <line>`、`--display-dio <line>`: TM1637 的 GPIO line offset，啟用時必填
+- `--display-brightness <0..7>`: 亮度，預設 `3`
+
+顯示器與 LED 共用 `--gpio-chip` 指定的 chip，但使用不同 line。CLK、DIO 必須不同，也不能與同時啟用的 LED line 衝突。`--no-led` 不會停用顯示器。
+
+## TM1637 顯示行為
+
+只顯示四位數字 `TCCC`，保留前導零，冒號及小數點關閉：
+
+| 顯示 | 意義 | 例子 |
+| --- | --- | --- |
+| `1CCC` | 啟動後 ICMP Echo Request 累計 | `1004`：4 次 |
+| `2CCC` | 啟動後 SSH initial SYN 規則事件累計 | `2002`：2 次 |
+| `3CCC` | 當前 scan window 中，單一來源最多的 unique TCP destination ports | `3017`：17 個 |
+
+- 啟動先顯示 `1000`，每約一秒固定輪播 `1 → 2 → 3`，不因事件插播。
+- 當頁數值約每 100 ms 檢查更新；數字相同時不重複傳送。
+- Type 1／2 不定期清零。內部保留累計值（到 `UINT64_MAX` 飽和），顯示最多為 `999`；程式重啟才歸零。
+- Type 2 沿用原規則的 5 秒 SYN 重傳去重；相同來源／目的 IP、port 及 TCP sequence 的重傳會刷新去重時間，被降為 INFO 的事件不再加一。它不是每個原始 SYN 都計數，也不代表 SSH 登入成功次數。
+- Type 3 是即時視窗狀態，不是累計告警次數。來源 A 有 8 個 port、B 有 12 個時顯示 `3012`，不加成 20。
+- 每個 port 沿用「距離最後出現時間 **超過** `--scan-window` 秒才過期」的規則；重複 port 只刷新時間。觸發告警不清零，數量仍可繼續增加。
+- 沒有新流量時，worker 仍會依快照時間排除過期 port；全部過期後顯示 `3000`。重新傳來的 SYN 可能延後歸零。
+
+Capture 執行緒只更新計數、建立並發布最新的不可變掃描快照，不等待顯示器。快照包含按來源分組的 port 最後出現時間；worker 不碰正在修改的偵測器。快照透過原子交換交接，尚未取用的舊快照會被回收，不排隊累積。快照建立成本與目前追蹤 port 數成正比，這仍是小規模原型。
+
+顯示初始化、快照配置或 GPIO／ACK 通訊失敗時，會警告並停用顯示器，監控、terminal、log 與 LED 繼續運作；不自動重試。所有 GPIO 通訊及延遲均在顯示 worker，正常退出時清空並關閉顯示。沒有接顯示器時使用預設 `--display none`。
+
+### 接線範例：Pi 3 B+ 與四位 TM1637
+
+以下 GPIO 編號是 BCM／gpiochip line offset，**不是實體針腳編號**。先以目標機的 GPIO 資訊確認 chip 與 line 對應。
+
+| 訊號 | Pi GPIO | Pi 實體針腳 | 連接方式 |
+| --- | --- | --- | --- |
+| CLK | GPIO27 | 13 | 經雙向 3.3V↔5V 電位轉換器接模組 CLK |
+| DIO | GPIO22 | 15 | 經雙向 3.3V↔5V 電位轉換器接模組 DIO |
+| VCC | 5V 電源 | 2 或 4 | 模組 VCC 及轉換器高壓側 |
+| 低壓參考 | 3.3V 電源 | 1 或 17 | 轉換器低壓側 |
+| GND | GND | 6 | Pi、轉換器及模組共地 |
+| LED（選用） | GPIO17 | 11 | 保留既有 LED 與限流電阻 |
+
+使用適合開漏訊號的雙向轉換器，各側需有對應電壓的上拉。DIO 在 ACK 時會由 TM1637 拉低，不能用單向轉換器。這個基準接法依 TM1637 資料表的 5V 工作條件規劃；若實際模組支援 3.3V，需依該模組規格確認，不能假定所有模組相同。Pi 的 GPIO 為 3.3V 邏輯，不直接接到模組的 5V 上拉。
+
+參考：[TM1637 資料表](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/unit/digi_clock/TM1637.pdf)、[Raspberry Pi GPIO 電壓規格](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#voltage-specifications)。
+
+只使用顯示器：
+
+```bash
+sudo ./netmon -i eth0 -l /tmp/netmon.log --no-led \
+  --display tm1637 --display-clk 27 --display-dio 22 --display-brightness 3
+```
+
+同時保留 LED：
+
+```bash
+sudo ./netmon -i eth0 -l /tmp/netmon.log --gpio-line 17 \
+  --display tm1637 --display-clk 27 --display-dio 22
+```
+
+### 展示與實機驗收
+
+1. 確認啟動訊息有 `display=tm1637`，拍攝 `1000 → 2000 → 3000` 輪播。
+2. 從 VM 執行 `ping -c 4 <pi-ip>`，在沒有其他 Echo Request 的情況下觀察 `1004`。
+3. 執行 `ssh -o ConnectTimeout=3 <pi-ip>`，對照去重後的 ALERT 與 Type 2 增加；連線被拒絕也可產生 SYN 事件。
+4. 在 scan window 內對多個 port 發送 SYN，對照 Type 3 增長與 `PORT_SCAN` log。掃描若包含 port 22，也可能增加 Type 2。
+5. 停止測試流量，在最後一個 SYN 過期後確認 Type 3 回到 `3000`，Type 1／2 保留。
+6. 同時啟用 LED，確認 SHORT／LONG／RAPID 保留；Ctrl+C 後確認顯示清空，重新啟動計數歸零。
+
+建議旁邊放「1＝ICMP、2＝SSH、3＝掃描視窗」對照卡。收集 log 與 tcpdump 證據時可執行：
+
+```bash
+sh scripts/run_pi_evidence.sh -i eth0 --no-led \
+  --display tm1637 --display-clk 27 --display-dio 22
+```
+
+腳本未提供 `--gpio-line` 時自動停用 LED，仍保留舊版 LED 執行方式及 `netmon_gpio_final.log` 檔名。模擬測試不能代替實際接線、電壓與 TM1637 畫面驗證；上述實機步驟需在 Pi 執行並保留證據後才能記為通過。
 
 ## LED 行為
 

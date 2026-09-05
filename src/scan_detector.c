@@ -26,7 +26,26 @@ struct ScanDetector {
     unsigned int window_seconds;
     size_t threshold;
     SourceEntry *sources;
+    uint64_t revision;
 };
+
+typedef struct SnapshotPort {
+    uint32_t src_ipv4;
+    time_t seen_at;
+} SnapshotPort;
+
+struct ScanSnapshot {
+    unsigned int window_seconds;
+    size_t port_count;
+    /* Entries from each source are contiguous, including refreshed timestamps. */
+    SnapshotPort ports[];
+};
+
+static bool outside_window(time_t now, time_t seen_at, unsigned int window_seconds)
+{
+    /* Match the existing detector, including its strict > boundary. */
+    return (unsigned int)difftime(now, seen_at) > window_seconds;
+}
 
 static void free_ports(PortEntry *ports)
 {
@@ -55,7 +74,7 @@ static void prune_ports(SourceEntry *source, time_t now, unsigned int window_sec
     while (current != NULL) {
         next = current->next;
         /* Ports outside the window should stop contributing to scan counts. */
-        if ((unsigned int)difftime(now, current->seen_at) > window_seconds) {
+        if (outside_window(now, current->seen_at, window_seconds)) {
             if (previous == NULL) {
                 source->ports = next;
             } else {
@@ -172,8 +191,18 @@ ScanDetector *scan_detector_create(unsigned int window_seconds, size_t threshold
 
 bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, ScanAlert *alert)
 {
+    /* Preserve the original fast path: unrelated packets do not even read time. */
+    if (detector == NULL || packet == NULL || alert == NULL ||
+        !packet->has_ipv4 || !packet->has_tcp || !packet->has_ports ||
+        (packet->tcp_flags & TH_SYN) == 0U || (packet->tcp_flags & TH_ACK) != 0U) {
+        return false;
+    }
+    return scan_detector_observe_at(detector, packet, alert, time(NULL));
+}
+
+bool scan_detector_observe_at(ScanDetector *detector, const PacketInfo *packet, ScanAlert *alert, time_t now)
+{
     SourceEntry *source;
-    time_t now;
     size_t unique_ports;
 
     if (detector == NULL || packet == NULL || alert == NULL) {
@@ -189,11 +218,11 @@ bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, Sca
         return false;
     }
 
-    now = time(NULL);
     if (now == (time_t)-1) {
         return false;
     }
 
+    ++detector->revision;
     prune_sources(detector, now);
 
     source = find_or_create_source(detector, packet->src_ipv4);
@@ -222,6 +251,74 @@ bool scan_detector_observe(ScanDetector *detector, const PacketInfo *packet, Sca
     alert->unique_ports = unique_ports;
     alert->window_seconds = detector->window_seconds;
     return true;
+}
+
+uint64_t scan_detector_revision(const ScanDetector *detector)
+{
+    return detector == NULL ? 0U : detector->revision;
+}
+
+ScanSnapshot *scan_detector_snapshot(const ScanDetector *detector)
+{
+    const SourceEntry *source;
+    const PortEntry *port;
+    ScanSnapshot *snapshot;
+    size_t count = 0U;
+    size_t index = 0U;
+    const size_t capacity = (SIZE_MAX - sizeof(ScanSnapshot)) / sizeof(SnapshotPort);
+
+    if (detector == NULL) {
+        return NULL;
+    }
+    for (source = detector->sources; source != NULL; source = source->next) {
+        for (port = source->ports; port != NULL; port = port->next) {
+            if (count == capacity) {
+                return NULL;
+            }
+            ++count;
+        }
+    }
+    snapshot = malloc(sizeof(*snapshot) + count * sizeof(snapshot->ports[0]));
+    if (snapshot == NULL) {
+        return NULL;
+    }
+    snapshot->window_seconds = detector->window_seconds;
+    snapshot->port_count = count;
+    for (source = detector->sources; source != NULL; source = source->next) {
+        for (port = source->ports; port != NULL; port = port->next) {
+            snapshot->ports[index].src_ipv4 = source->src_ipv4;
+            snapshot->ports[index++].seen_at = port->seen_at;
+        }
+    }
+    return snapshot;
+}
+
+size_t scan_snapshot_max_ports(const ScanSnapshot *snapshot, time_t now)
+{
+    size_t maximum = 0U;
+    size_t count = 0U;
+    size_t index;
+
+    if (snapshot == NULL || now == (time_t)-1) {
+        return 0U;
+    }
+    for (index = 0U; index < snapshot->port_count; ++index) {
+        if (index == 0U || snapshot->ports[index].src_ipv4 != snapshot->ports[index - 1U].src_ipv4) {
+            count = 0U;
+        }
+        if (!outside_window(now, snapshot->ports[index].seen_at, snapshot->window_seconds)) {
+            ++count;
+            if (count > maximum) {
+                maximum = count;
+            }
+        }
+    }
+    return maximum;
+}
+
+void scan_snapshot_destroy(ScanSnapshot *snapshot)
+{
+    free(snapshot);
 }
 
 void scan_detector_destroy(ScanDetector *detector)

@@ -4,13 +4,18 @@
 set -eu
 
 usage() {
-    echo "Usage: $0 -i <interface> --gpio-line <line> [--gpio-chip <path>] [--output-dir <path>]" >&2
+    echo "Usage: $0 -i <interface> [--gpio-line <line>] [--no-led] [--gpio-chip <path>] [--display none|tm1637] [--display-clk <line>] [--display-dio <line>] [--display-brightness <0..7>] [--output-dir <path>]" >&2
     exit 2
 }
 
 interface=""
 gpio_chip="/dev/gpiochip0"
 gpio_line=""
+no_led=0
+display="none"
+display_clk=""
+display_dio=""
+display_brightness=3
 output_dir=""
 tcpdump_pid=""
 
@@ -31,6 +36,30 @@ while [ "$#" -gt 0 ]; do
             gpio_line="$2"
             shift 2
             ;;
+        --no-led)
+            no_led=1
+            shift
+            ;;
+        --display)
+            [ "$#" -ge 2 ] || usage
+            display="$2"
+            shift 2
+            ;;
+        --display-clk)
+            [ "$#" -ge 2 ] || usage
+            display_clk="$2"
+            shift 2
+            ;;
+        --display-dio)
+            [ "$#" -ge 2 ] || usage
+            display_dio="$2"
+            shift 2
+            ;;
+        --display-brightness)
+            [ "$#" -ge 2 ] || usage
+            display_brightness="$2"
+            shift 2
+            ;;
         --output-dir)
             [ "$#" -ge 2 ] || usage
             output_dir="$2"
@@ -46,7 +75,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$interface" ] || usage
-[ -n "$gpio_line" ] || usage
+case "$display" in
+    none) ;;
+    tm1637) [ -n "$display_clk" ] && [ -n "$display_dio" ] || usage ;;
+    *) usage ;;
+esac
+case "$display_brightness" in
+    [0-7]) ;;
+    *) usage ;;
+esac
 [ -x "./netmon" ] || {
     echo "Error: run this script from the directory containing the GPIO-enabled ./netmon binary." >&2
     exit 1
@@ -106,16 +143,29 @@ for p in $(seq 1 30); do
   nc -zn -w 1 "$PI_IP" "$p" >/dev/null 2>&1 &
 done
 wait
+
+# Stop the test traffic and keep filming for at least 12 seconds.
+# Type 3 falls back to 3000 after the last SYN to each port expires.
+# The scan includes port 22, so Type 2 may also increase.
 EOF
 
 echo "Starting tcpdump. Generated VM commands: $output_dir/VM_COMMANDS.txt"
-echo "Run the commands from the Ubuntu VM, record the LED demonstration, then press Ctrl+C here."
+echo "Run the commands from the Ubuntu VM, record the display/LED demonstration, then press Ctrl+C here."
 
 sudo tcpdump -ni "$interface" -w "$pcap_file" 'icmp or tcp or udp port 53' &
 tcpdump_pid=$!
 
-sudo ./netmon \
-    -i "$interface" \
-    -l "$log_file" \
-    --gpio-chip "$gpio_chip" \
-    --gpio-line "$gpio_line"
+set -- -i "$interface" -l "$log_file" --gpio-chip "$gpio_chip" \
+    --display "$display" --display-brightness "$display_brightness"
+if [ "$no_led" -eq 1 ] || [ -z "$gpio_line" ]; then
+    set -- "$@" --no-led
+else
+    set -- "$@" --gpio-line "$gpio_line"
+fi
+if [ -n "$display_clk" ]; then
+    set -- "$@" --display-clk "$display_clk"
+fi
+if [ -n "$display_dio" ]; then
+    set -- "$@" --display-dio "$display_dio"
+fi
+sudo ./netmon "$@"
