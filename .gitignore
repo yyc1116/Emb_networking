@@ -1,4 +1,11 @@
 *.md
-| README.md
+!README.md
+
 *.txt
-*.log
+!finalTest/verification/
+!finalTest/verification/**
+!finalTest/VM_COMMANDS.txt
+
+image/*
+report/*
+testPi/*

@@ -1,0 +1,15 @@
+# I run these commands from the Ubuntu VM after netmon starts on the Pi.
+PI_IP=<pi-ip>
+
+ping -c 1 "$PI_IP"
+ssh -o ConnectTimeout=3 "$PI_IP"
+printf 'netmon-dns-test\n' | nc -u -w 1 "$PI_IP" 53
+
+for p in $(seq 1 30); do
+  nc -zn -w 1 "$PI_IP" "$p" >/dev/null 2>&1 &
+done
+wait
+
+# Stop the test traffic and keep filming for at least 12 seconds.
+# Type 3 falls back to 3000 after the last SYN to each port expires.
+# The scan includes port 22, so Type 2 may also increase.
