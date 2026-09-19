@@ -8,6 +8,7 @@
 
 image/*
 !image/flowchart.png
+!image/network_topo.png
 !image/result/
 !image/result/**
 image/result/**/*.[Mm][Oo][Vv]
