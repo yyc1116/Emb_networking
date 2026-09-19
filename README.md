@@ -66,7 +66,7 @@ GPIO 版本另需目標環境提供 libgpiod 1.x。切換 compiler 或 `ENABLE_G
 
 ## Raspberry Pi 執行方式
 
-以下是本次實驗使用的 GPIO 配置：LED 為 GPIO17、TM1637 CLK 為 GPIO27、DIO 為 GPIO22。
+以下是本次實驗使用的 GPIO 配置：LED 為 GPIO4、TM1637 CLK 為 GPIO25、DIO 為 GPIO24。
 需依照實際接腳修改。
 
 ```bash
